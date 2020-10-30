@@ -1,0 +1,41 @@
+#!/usr/bin/env python
+
+import argparse
+import multiprocessing
+
+from distributed_computing.api import start_server, start_head_client, start_client
+from distributed_computing.globals import DEFAULT_PORT
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("-r", "--password", help='Security password')
+parser.add_argument("-d", "--head", action="store_true", help='Indicate that this is the head node')
+parser.add_argument("-s", "--server-only", action="store_true", help='Run only the server')
+parser.add_argument("-a", "--address", required=False, help='Head node address')
+parser.add_argument("-p", "--port", required=False, type=int, help='Head node port')
+
+
+if __name__ == '__main__':
+
+    multiprocessing.set_start_method('spawn')
+
+    args = parser.parse_args()
+
+    if args.head is False and args.address is None:
+        parser.error('head or address must be provided')
+
+    if args.server_only is True and args.head is False:
+        parser.error('server-only is only relevant for head nodes')
+
+    port = args.port or DEFAULT_PORT
+
+    if args.head and args.server_only:
+        terminate, wait = start_server(args.password, port)
+
+    elif args.head:
+        terminate, wait = start_head_client(args.password, port)
+
+    else:
+        terminate, wait = start_client(args.password, args.address, port, True)
+
+    wait()
