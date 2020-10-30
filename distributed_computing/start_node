@@ -3,7 +3,7 @@
 import argparse
 import multiprocessing
 
-from distributed_computing.api import start_server, start_head_client, start_client
+from distributed_computing.api import start_server, start_head_node, start_node
 from distributed_computing.globals import DEFAULT_PORT
 
 parser = argparse.ArgumentParser()
@@ -33,9 +33,9 @@ if __name__ == '__main__':
         terminate, wait = start_server(args.password, port)
 
     elif args.head:
-        terminate, wait = start_head_client(args.password, port)
+        terminate, wait = start_head_node(args.password, port)
 
     else:
-        terminate, wait = start_client(args.password, args.address, port, True)
+        terminate, wait = start_node(args.password, args.address, port, True)
 
     wait()

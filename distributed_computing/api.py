@@ -34,7 +34,7 @@ def start_redis(password):
         return subprocess.Popen([redis_server.REDIS_SERVER_PATH, conf_file, '--protected-mode no'], stdout=FNULL)
 
 
-def start_client(password, address='localhost', port=DEFAULT_PORT, violent_exit=True):
+def start_node(password, address='localhost', port=DEFAULT_PORT, violent_exit=True):
 
     if is_client_running():
         print('A client is already running on this machine')
@@ -71,10 +71,10 @@ def start_server(password, port=DEFAULT_PORT):
     return terminate, lambda: pool_server.join()
 
 
-def start_head_client(password, port=DEFAULT_PORT):
+def start_head_node(password, port=DEFAULT_PORT):
 
     server_terminator, server_waiter = start_server(password, port)
-    client_terminator, client_waiter = start_client(password, port=port)
+    client_terminator, client_waiter = start_node(password, port=port)
 
     def terminate():
         server_terminator()
