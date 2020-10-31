@@ -236,3 +236,6 @@ distributed_computing.api.WorkerInterface.handle_update(self, *args, **kwargs)
 This method is called when the pool.update_workers is called by the pool owner with the provided args and
 kwargs. The returned value is ignored.  
 
+
+### TODO
+* Encrypt messages
