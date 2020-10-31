@@ -92,7 +92,7 @@ distributed_computing.api.start_redis(password)
 ```
 Start a dedicated redis server on the local machine.  
   
-*password* worker pool password to prevent unauthorized access.  
+**password** worker pool password to prevent unauthorized access.  
   
 **returns** None if the redis server is already running, or a process handle if it has been started by this function.  
 
@@ -102,10 +102,10 @@ distributed_computing.api.start_node(password, address='localhost', port=DEFAULT
 ```
 Start a worker node on the local machine.  
   
-*password* worker pool password to prevent unauthorized access.  
-*address* workers pool server address. If not provided, assumed to be the local machine (localhost).  
-*port* workers pool server port.  
-*violent_exit* Use sys.exit(1) to kill the node when SIGKILL is triggered.  
+**password** worker pool password to prevent unauthorized access.  
+**address** workers pool server address. If not provided, assumed to be the local machine (localhost).  
+**port** workers pool server port.  
+**violent_exit** Use sys.exit(1) to kill the node when SIGKILL is triggered.  
   
 **returns** a function that terminates the node process. A function that waits for it to finish.  
 
@@ -115,8 +115,8 @@ distributed_computing.api.start_server(password, port=DEFAULT_PORT)
 Start the worker pool server on the local machine. May be used to separate pool management from worker machines.
 A redis server is also started by this function if not already running.  
   
-*password* worker pool password to prevent unauthorized access.  
-*port* workers pool server port.  
+**password** worker pool password to prevent unauthorized access.  
+**port** workers pool server port.  
   
 **returns** a function that terminates the pool server process. A function that waits for it to finish.  
 
@@ -126,8 +126,8 @@ distributed_computing.api.start_head_node(password, port=DEFAULT_PORT)
 Start a worker pool server and a worker node on the local machine. A redis server is also started by this function
 if not already running.  
   
-*password* worker pool password to prevent unauthorized access.  
-*port* workers pool server port.  
+**password** worker pool password to prevent unauthorized access.  
+**port** workers pool server port.  
   
 **returns** a function that terminates both the server and the node process. A function that waits for both it to
 finish.  
@@ -156,22 +156,22 @@ distributed_computing.api.Pool.__init__(self, worker_class, init_data, password,
 ```
 Initialize pool and connect to the worker pool server.  
   
-*worker_class* A worker class that implements the WorkerInterface. This class is instantiated on each
+**worker_class** A worker class that implements the WorkerInterface. This class is instantiated on each
 worker process in the worker machines.  
-*init_data* Initialization data that is passed to the worker class constructor. This is a dictionary
+**init_data** Initialization data that is passed to the worker class constructor. This is a dictionary
 of the form {'args': [...], 'kwargs': {...}}. The args are provided to the worker class constructor as args,
 and the kwargs are provided as keyword args.  
-*password* worker pool password to prevent unauthorized access.  
-*server_address* workers pool server address. If not provided, assumed to be the local machine
+**password** worker pool password to prevent unauthorized access.  
+**server_address** workers pool server address. If not provided, assumed to be the local machine
 (localhost).  
-*server_port* workers pool server port.  
+**server_port** workers pool server port.  
 
 ```
 distributed_computing.api.Pool.imap_unordered(self, data)
 ```
 Return results once ready. Order is not guaranteed. Similar to multiprocessing.Pool.imap_unordered.  
   
-*data* List of items to be processed by the worker. This is a dictionary
+**data** List of items to be processed by the worker. This is a dictionary
 of the form {'args': [...], 'kwargs': {...}}. The args are provided to the worker class run method as args,
 and the kwargs are provided as keyword args.  
 
@@ -180,7 +180,7 @@ distributed_computing.api.Pool.map(self, data)
 ```
 Return all the results, ordered by the corresponding inputs ordering. Similar to multiprocessing.Pool.map.  
   
-*data* List of items to be processed by the worker. This is a dictionary
+**data** List of items to be processed by the worker. This is a dictionary
 of the form {'args': [...], 'kwargs': {...}}. The args are provided to the worker class run method as args,
 and the kwargs are provided as keyword args.  
   
@@ -206,7 +206,7 @@ distributed_computing.api.Pool.update_workers(self, data)
 Send a synchronous update to all worker processes. The workers will get this update once they finish the
 current job, or immediately if no job is being processed.  
   
-*data* update data that is passed to the worker handle_update method. This is a dictionary
+**data** update data that is passed to the worker handle_update method. This is a dictionary
 of the form {'args': [...], 'kwargs': {...}}. The args are provided to the worker class handle_update method as
 args, and the kwargs are provided as keyword args.  
   
