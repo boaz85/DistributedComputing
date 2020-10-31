@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(name='distributed_computing',
-      version='0.0.0',
+      version='0.1.0',
       description='Distributed GPU computing with python',
       packages=['distributed_computing'],
       author_email='boaz85@gmail.com',
