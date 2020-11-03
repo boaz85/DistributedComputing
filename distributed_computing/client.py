@@ -18,7 +18,7 @@ from distributed_computing.common import RedisQueue, BaseProtocol
 
 class ExperimentWorkerExecutor(Process):
 
-    def __init__(self, client_name, gpu_idx, job_q, results_q, private_q, status_q, worker_class, init_data,
+    def __init__(self, client_name, gpu_idx, job_q, results_q, private_q, status_q, outputs_q, worker_class, init_data,
                  head_address, head_password):
         super(ExperimentWorkerExecutor, self).__init__()
 
@@ -27,6 +27,7 @@ class ExperimentWorkerExecutor(Process):
         self.results_q_name = results_q
         self.private_q_name = private_q
         self.status_q_name = status_q
+        self.outputs_q_name = outputs_q
         self.gpu_idx = gpu_idx
         self.init_data = init_data
         self.worker_class = worker_class
@@ -47,6 +48,21 @@ class ExperimentWorkerExecutor(Process):
         results_q = RedisQueue(self.results_q_name, self.head_password, self.head_address)
         private_q = RedisQueue(self.private_q_name, self.head_password, self.head_address)
         status_q = RedisQueue(self.status_q_name, self.head_password, self.head_address)
+        outputs_q = RedisQueue(self.outputs_q_name, self.head_password, self.head_address)
+
+        worker_name = f'{self.client_name}@{self.gpu_idx}'
+
+        original_stdout = sys.stdout
+
+        class StdoutQueue(object):
+            def write(self, msg):
+                outputs_q.put(pickle.dumps((worker_name, msg)))
+                original_stdout.write(msg)
+
+            def flush(self):
+                sys.__stdout__.flush()
+
+        sys.stdout = StdoutQueue()
 
         os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_idx)
         worker = self._get_worker_instance(self.init_data)
@@ -101,7 +117,8 @@ class ClientProtocol(BaseProtocol):
         for i, private_q in enumerate(data['private_qs']):
 
             worker_process = ExperimentWorkerExecutor(data['client_name'], i, data['jobs_q'], data['results_q'],
-                                                      private_q, data['status_q'], data['worker_class'],
+                                                      private_q, data['status_q'], data['outputs_q'],
+                                                      data['worker_class'],
                                                       data['init_data'], self.factory.head_address,
                                                       self.factory.redis_password)
             worker_process.start()
