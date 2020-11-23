@@ -242,9 +242,6 @@ class Pool(object):
 
         while len(remaining) > 0:
 
-            if jobs_q.qsize() == 0:
-                print(remaining)
-
             index, result = results_q.get()
 
             if result is None:
