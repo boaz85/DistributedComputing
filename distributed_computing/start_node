@@ -13,6 +13,7 @@ parser.add_argument("-d", "--head", action="store_true", help='Indicate that thi
 parser.add_argument("-s", "--server-only", action="store_true", help='Run only the server')
 parser.add_argument("-a", "--address", required=False, help='Head node address')
 parser.add_argument("-p", "--port", required=False, type=int, help='Head node port')
+parser.add_argument("-n", "--name", required=False, help='Node name')
 
 
 if __name__ == '__main__':
@@ -36,6 +37,6 @@ if __name__ == '__main__':
         terminate, wait = start_head_node(args.password, port)
 
     else:
-        terminate, wait = start_node(args.password, args.address, port, True)
+        terminate, wait = start_node(args.password, args.address, port)
 
     wait()

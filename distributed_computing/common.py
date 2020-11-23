@@ -3,7 +3,6 @@ import socket
 import time
 
 import redis
-from twisted.internet import protocol
 
 # https://github.com/andymccurdy/redis-py/issues/722
 from distributed_computing.globals import DEFAULT_PORT
@@ -15,7 +14,8 @@ def safe_block(foo):
         while True:
             try:
                 return foo(self, *args, **kwargs)
-            except (socket.timeout, redis.exceptions.TimeoutError):
+            except (socket.timeout, redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+                time.sleep(3)
                 self._connect()
 
     return safe_foo
@@ -23,16 +23,18 @@ def safe_block(foo):
 
 class RedisQueue(object):
     """Simple Queue with Redis Backend"""
-    def __init__(self, name, password, host='localhost', namespace='queue'):
+    def __init__(self, name, password, host='localhost', port=DEFAULT_PORT, namespace='queue'):
 
         self._host = host
+        self._port = port
         self._password = password
 
         self._connect()
         self.key = '%s:%s' %(namespace, name)
 
     def _connect(self):
-        self.__db = redis.Redis(host=self._host, password=self._password, socket_keepalive=True, socket_timeout=60)
+        self.__db = redis.Redis(host=self._host, port=self._port, password=self._password, socket_keepalive=True,
+                                socket_timeout=60)
 
     def reconnect(self):
         self._connect()
@@ -55,7 +57,7 @@ class RedisQueue(object):
     @safe_block
     def put(self, item):
         """Put item into the queue."""
-        self.__db.rpush(self.key, item)
+        self.__db.rpush(self.key, pickle.dumps(item))
 
     @safe_block
     def get(self, block=True, timeout=None):
@@ -71,7 +73,8 @@ class RedisQueue(object):
         else:
             item = self.__db.lpop(self.key)
 
-        return item
+        if item is not None:
+            return pickle.loads(item)
 
     def get_nowait(self):
         """Equivalent to get(False)."""
@@ -87,14 +90,3 @@ class RedisQueue(object):
             message = self.get(False)
 
         return messages
-
-
-class BaseProtocol(protocol.Protocol):
-
-    def __init__(self, factory):
-        self.factory = factory
-
-    def _send_message(self, m_type, data):
-
-        binary = pickle.dumps((m_type, data))
-        self.transport.write(binary)

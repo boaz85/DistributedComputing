@@ -1,38 +1,36 @@
-import argparse
+import atexit
 import os
-import pickle
 import signal
-import sys
+import socket
 import time
 from multiprocessing import Process
 
 import GPUtil
 import psutil
-import setproctitle
-from twisted.internet import reactor
-from twisted.internet.protocol import ClientFactory
 
-from distributed_computing.globals import CLIENT_PROCESS_NAME
-from distributed_computing.common import RedisQueue, BaseProtocol
+from distributed_computing.common import RedisQueue
+from distributed_computing.globals import MANAGEMENT_Q_NAME
 
 
 class ExperimentWorkerExecutor(Process):
 
-    def __init__(self, client_name, gpu_idx, job_q, results_q, private_q, status_q, outputs_q, worker_class, init_data,
-                 head_address, head_password):
+    def __init__(self, name, client_name, gpu_idx, job_q, results_q, master_q, private_q, worker_class, init_data,
+                 master_host, master_port, master_password):
+
         super(ExperimentWorkerExecutor, self).__init__()
 
+        self.name = name
         self.client_name = client_name
         self.jobs_q_name = job_q
         self.results_q_name = results_q
         self.private_q_name = private_q
-        self.status_q_name = status_q
-        self.outputs_q_name = outputs_q
+        self.master_q_name = master_q
         self.gpu_idx = gpu_idx
         self.init_data = init_data
         self.worker_class = worker_class
-        self.head_address = head_address
-        self.head_password = head_password
+        self.head_address = master_host
+        self.head_password = master_password
+        self.master_port = master_port
 
     def _get_worker_instance(self, init_data):
         """
@@ -47,135 +45,132 @@ class ExperimentWorkerExecutor(Process):
         jobs_q = RedisQueue(self.jobs_q_name, self.head_password, self.head_address)
         results_q = RedisQueue(self.results_q_name, self.head_password, self.head_address)
         private_q = RedisQueue(self.private_q_name, self.head_password, self.head_address)
-        status_q = RedisQueue(self.status_q_name, self.head_password, self.head_address)
-        outputs_q = RedisQueue(self.outputs_q_name, self.head_password, self.head_address)
-
-        worker_name = f'{self.client_name}@{self.gpu_idx}'
-
-        original_stdout = sys.stdout
-
-        class StdoutQueue(object):
-            def write(self, msg):
-                outputs_q.put(pickle.dumps((worker_name, msg)))
-                original_stdout.write(msg)
-
-            def flush(self):
-                sys.__stdout__.flush()
-
-        sys.stdout = StdoutQueue()
+        master_q = RedisQueue(self.master_q_name, self.head_password, self.head_address)
 
         os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_idx)
         worker = self._get_worker_instance(self.init_data)
 
         while True:
 
-            index, data = pickle.loads(jobs_q.get())
-            status_q.put(pickle.dumps((self.client_name, self.gpu_idx, index, 'in_progress')))
+            index, data = jobs_q.get()
+            master_q.put(('WORKER_STATUS_UPDATE', {'client': self.client_name, 'worker': self.name,
+                                                   'job': index, 'status': 'in_progress'}))
+            print('Processing job', index)
 
-            for message in private_q.get_all_nowait():
-                update_data = pickle.loads(message)
+            for update_data in private_q.get_all_nowait():
                 worker.handle_update(*update_data.get('args', []), **update_data.get('kwargs', {}))
 
             result = worker.run(*data.get('args', []), **data.get('kwargs', {}))
-            results_q.put(pickle.dumps((index, result)))
-            status_q.put(pickle.dumps((self.client_name, self.gpu_idx, index, 'finished')))
+            results_q.put((index, result))
+            master_q.put(('WORKER_STATUS_UPDATE', {'client': self.client_name, 'worker': self.name,
+                                                   'job': index, 'status': 'finished'}))
+            print('Done processing job', index)
 
 
-class ClientProtocol(BaseProtocol):
+class PoolClient(object):
 
-    def __init__(self, factory):
-        super(ClientProtocol, self).__init__(factory)
-        self.factory = factory
-        self.factory.worker_processes = []
+    def __init__(self, host, port, password):
 
-    def connectionMade(self):
-        self.factory.worker_processes = []
-        print('Connection succeed. Asking to start workers.')
-        self._send_join_request()
+        self._host = host
+        self._port = port
+        self._password = password
+        self._workers = {}
+        self._gpu_memory_required = 0
+        self._name = socket.gethostname()
+        self._task_assigned = False
+        self._management_q = RedisQueue(MANAGEMENT_Q_NAME, self._password, self._host, self._port)
 
-    def dataReceived(self, bin_data):
+        atexit.register(self._kill_all_workers)
 
-        try:
-            message, data = pickle.loads(bin_data)
-        except pickle.UnpicklingError as e:
-            print('Unpickling failed. Request ignored.')
-            return
+    def start(self):
 
-        if message == 'WAIT_FOR_WORK':
-            time.sleep(2)
-            self._send_join_request()
+        private_q = RedisQueue(self._name, self._password, self._host, self._port)
+        self._send_heartbeat_to_server(first=True)
 
-        elif message == 'CREATE_WORKERS':
-            self._handle_create_workers(data)
+        while True:
 
-    def _handle_create_workers(self, data):
+            item = private_q.get(timeout=10)
 
-        print(f'Creating {len(data["private_qs"])} worker{"s" if len(data["private_qs"]) > 1 else ""}.')
+            self._send_heartbeat_to_server()
 
-        self.factory.worker_process = []
+            if self._task_assigned:
+                self._start_available_workers()
 
-        for i, private_q in enumerate(data['private_qs']):
+            if item is None:
+                continue
 
-            worker_process = ExperimentWorkerExecutor(data['client_name'], i, data['jobs_q'], data['results_q'],
-                                                      private_q, data['status_q'], data['outputs_q'],
-                                                      data['worker_class'],
-                                                      data['init_data'], self.factory.head_address,
-                                                      self.factory.redis_password)
-            worker_process.start()
+            message, data = item
 
-            self.factory.worker_processes.append(worker_process.pid)
+            if message == 'TASK_ASSIGNMENT':
+                self._handle_task_assignment(data)
 
-    def _send_join_request(self):
-        message = {'num_workers': self.factory.num_gpus}
-        self._send_message('JOIN_REQUEST', message)
+            elif message == 'WORKER_RESET':
+                self._handle_worker_reset(data)
 
+            else:
+                print('Ignoring unknown message:', message)
 
-class WorkerClientFactory(ClientFactory):
-    protocol = ClientProtocol
+    def _start_available_workers(self):
 
-    def __init__(self, num_gpus, head_address, redis_password):
-        super(WorkerClientFactory, self).__init__()
-        self.num_gpus = num_gpus
-        self.head_address = head_address
-        self.redis_password = redis_password
+        for worker_name, info in self._get_available_gpus().items():
+            if worker_name in self._workers:
+                continue
 
-    def clientConnectionFailed(self, connector, reason):
-        print('Connection failed:', reason.getErrorMessage())
-        time.sleep(3)
-        print('Trying to reconnect')
-        connector.connect()
+            if info['free_gpu_memory'] > self._gpu_memory_required:
+                self._workers[worker_name] = info
+                self._workers[worker_name]['pid'] = self._start_worker(worker_name, info['gpu_index'])
 
-    def clientConnectionLost(self, connector, reason):
-        print('Connection lost:', reason.getErrorMessage())
+    def _handle_worker_reset(self, worker_name):
 
-        print('Terminating worker processes')
-        for pid in self.worker_processes:
-            psutil.Process(pid).send_signal(signal.SIGKILL)
+        print('Killing worker:', worker_name)
+        self._kill_worker(worker_name)
 
-        time.sleep(3)
-        print('Trying to reconnect')
-        connector.connect()
+        time.sleep(10)
 
-    def buildProtocol(self, addr):
-        return ClientProtocol(self)
+        print('Restarting worker:', worker_name)
+        self._workers[worker_name]['pid'] = self._start_worker(worker_name, self._workers[worker_name]['gpu_index'])
 
+    def _get_available_gpus(self):
+        return {str(gpu.id): {'gpu_index': gpu.id, 'free_gpu_memory': gpu.memoryFree} for gpu in GPUtil.getGPUs()}
 
-def run_pool_client(address, port, password, violent_exit=False):
+    def _send_heartbeat_to_server(self, first=False):
+        self._management_q.put(('CLIENT_HEARTBEAT', {'name': self._name, 'first': first,
+                                                     'worker_names': list(self._workers)}))
 
-    setproctitle.setproctitle(CLIENT_PROCESS_NAME)
+    def _kill_all_workers(self):
+        for worker in self._workers:
+            self._kill_worker(worker)
 
-    num_gpus = len(GPUtil.getAvailable(maxMemory=0.3, limit=100))
-    print(f'Workers client started. {num_gpus} available GPU{"s" if num_gpus > 1 else ""} detected.')
+        self._workers = {}
 
-    print(f'Connecting to the pool server on {address}:{port}.')
-    factory = WorkerClientFactory(num_gpus, address, password)
-    reactor.connectTCP(address, port, factory)
+    def _kill_worker(self, worker_name):
+        if worker_name in self._workers:
+            psutil.Process(self._workers[worker_name]['pid']).send_signal(signal.SIGKILL)
 
-    if violent_exit:
-        def force_exit(*args):
-            reactor.callFromThread(reactor.stop) # to
-            sys.exit(1)
+    def _start_worker(self, worker_name, gpu_index):
 
-        signal.signal(signal.SIGINT, force_exit)
+        worker_q_name = f'{self._name}@{worker_name}'
 
-    reactor.run()
+        worker_process = ExperimentWorkerExecutor(worker_name, self._name, gpu_index, self._jobs_q_name,
+                                                  self._results_q_name, MANAGEMENT_Q_NAME, worker_q_name,
+                                                  self._worker_class, self._init_data, self._host, self._port,
+                                                  self._password)
+        worker_process.start()
+        return worker_process.pid
+
+    def _handle_task_assignment(self, data):
+
+        self._kill_all_workers()
+
+        self._jobs_q_name = data['jobs_q_name']
+        self._results_q_name = data['results_q_name']
+        self._worker_class = data['worker_class']
+        self._init_data = data['init_data']
+        self._gpu_memory_required = data['gpu_memory_required']
+        self._task_assigned = True
+
+        self._start_available_workers()
+
+    def stop(self):
+        self._kill_all_workers()
+

@@ -1,45 +1,25 @@
-import os
-import pickle
 import socket
-import subprocess
-import tempfile
 import time
+from datetime import datetime
 from multiprocessing import Process
 
 import psutil
 import requests
-import redis_server
-from redis import Redis
+import setproctitle
 
-from distributed_computing.client import run_pool_client
-from distributed_computing.globals import DEFAULT_PORT, SERVER_PROCESS_NAME, CLIENT_PROCESS_NAME
-from distributed_computing.server import run_pool_server
 from distributed_computing.common import RedisQueue
+from distributed_computing.client import PoolClient
+from distributed_computing.globals import DEFAULT_PORT, MANAGEMENT_Q_NAME, SERVER_PROCESS_NAME, CLIENT_PROCESS_NAME
+from distributed_computing.server import PoolServer
 
 
-def start_redis(password):
-    """
-    Start a dedicated redis server on the local machine.
-    :param password: worker pool password to prevent unauthorized access.
-    :return: None if the redis server is already running, or a process handle if it has been started by this function.
-    """
-
-    try:
-        Redis('localhost', password=password, socket_connect_timeout=1).ping()
-    except:
-        _, conf_file = tempfile.mkstemp()
-
-        with open(conf_file, 'w') as f:
-            f.write(f'requirepass {password}')
-
-        FNULL = open(os.devnull, 'w')
-
-        print('Redis server is started.')
-
-        return subprocess.Popen([redis_server.REDIS_SERVER_PATH, conf_file, '--protected-mode no'], stdout=FNULL)
+def _run_pool_client(host, port, password):
+    setproctitle.setproctitle(CLIENT_PROCESS_NAME)
+    client = PoolClient(host, port, password)
+    client.start()
 
 
-def start_node(password, address='localhost', port=DEFAULT_PORT, violent_exit=True):
+def start_node(password, address='localhost', port=DEFAULT_PORT):
     """
     Start a worker node on the local machine.
     :param password: worker pool password to prevent unauthorized access.
@@ -56,10 +36,16 @@ def start_node(password, address='localhost', port=DEFAULT_PORT, violent_exit=Tr
 
     print('Starting workers pool client.')
 
-    client = Process(target=run_pool_client, args=(address, port, password, violent_exit))
+    client = Process(target=_run_pool_client, args=(address, port, password))
     client.start()
 
     return lambda: client.terminate(), lambda: client.join()
+
+
+def _run_pool_server(host, port, password):
+    setproctitle.setproctitle(SERVER_PROCESS_NAME)
+    server = PoolServer(host, port, password)
+    server.start()
 
 
 def start_server(password, port=DEFAULT_PORT):
@@ -74,17 +60,9 @@ def start_server(password, port=DEFAULT_PORT):
         print('A server is already running on this machine.')
         return lambda: 0, lambda: 0
 
-    redis_process = start_redis(password)
-
     print('Starting workers pool server.')
-    pool_server = Process(target=run_pool_server, args=(port, password))
+    pool_server = Process(target=_run_pool_server, args=('localhost', port, password))
     pool_server.start()
-
-    def terminate():
-        pool_server.terminate()
-
-        if redis_process is not None:
-            redis_process.terminate()
 
     print('\n' + '\033[36m*\033[0m' * 90)
     print('\033[1mTo start a worker node, type:\033[0m')
@@ -93,7 +71,7 @@ def start_server(password, port=DEFAULT_PORT):
     print(f'\033[92mstart_node -p {port} -a {ip} -r {password}\033[0m')
     print('\033[36m*\033[0m' * 90 + '\n')
 
-    return terminate, lambda: pool_server.join()
+    return lambda: pool_server.terminate(), lambda: pool_server.join()
 
 
 def start_head_node(password, port=DEFAULT_PORT):
@@ -139,7 +117,8 @@ class Pool(object):
     """
     Worker pool interface, similar to python multiprocessing Pool interface.
     """
-    def __init__(self, worker_class, init_data, password, server_address='localhost', server_port=DEFAULT_PORT):
+    def __init__(self, worker_class, init_data, password, server_address='localhost', server_port=DEFAULT_PORT,
+                 job_timeout=None, min_gpu_memory_required=11000):
         """
         Initialize pool and connect to the worker pool server.
         :param worker_class: A worker class that implements the WorkerInterface. This class is instantiated on each
@@ -155,13 +134,22 @@ class Pool(object):
         self._address = server_address
         self._port = server_port
         self._password = password
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.connect((self._address, self._port))
 
-        self._jobs_q, self._results_q, self._reschedule_q = self._init_work(worker_class, init_data)
+        self._name = f'{socket.gethostname()}@{worker_class.__name__}'
 
-        # Let the clients connect to the server
-        time.sleep(2)
+        self._management_q = RedisQueue(MANAGEMENT_Q_NAME, self._password, self._address, self._port)
+        self._private_q = RedisQueue(self._name, self._password, self._address, self._port)
+
+        self._management_q.put(('TASK_ASSIGNMENT', {'init_data': init_data, 'worker_class': worker_class,
+                                                    'name': self._name, 'job_timeout': job_timeout,
+                                                    'min_gpu_memory_required': min_gpu_memory_required}))
+        message, data = self._private_q.get()
+
+        if message != 'TASK_APPROVAL':
+            raise Exception('Work was not approved by the pool server')
+
+        self._jobs_q_name = data['jobs_q_name']
+        self._results_q_name = data['results_q_name']
 
     def imap_unordered(self, data):
         """
@@ -193,28 +181,34 @@ class Pool(object):
         Get the current number of worker processes. Not to be confused with the number of worker nodes (machines).
         :return: number of worker processes.
         """
-        binary = pickle.dumps(('COUNTS_REQUEST', None))
-        self._socket.sendall(binary)
-        response = self._socket.recv(4096)
-        m_type, counts_info = pickle.loads(response)
+        self._management_q.put(('COUNTS_REQUEST', None))
+        message, data = self._private_q.get()
 
-        assert m_type == 'COUNTS_RESPONSE', 'Invalid response for COUNTS_REQUEST'
+        assert message == 'COUNTS_RESPONSE', 'Invalid response for WORKERS_COUNTS'
 
-        return counts_info['num_workers']
+        return data['workers_count']
 
     def get_nodes_count(self):
         """
         Get the current number of worker nodes. Not to be confused with the number of worker processes.
         :return: number of worker nodes.
         """
-        binary = pickle.dumps(('COUNTS_REQUEST', None))
-        self._socket.sendall(binary)
-        response = self._socket.recv(4096)
-        m_type, counts_info = pickle.loads(response)
+        self._management_q.put(('COUNTS_REQUEST', None))
+        message, data = self._private_q.get()
 
-        assert m_type == 'COUNTS_RESPONSE', 'Invalid response for COUNTS_REQUEST'
+        assert message == 'COUNTS_RESPONSE', 'Invalid response for WORKERS_COUNTS'
 
-        return counts_info['num_clients']
+        return data['clients_count']
+
+    def wait_for_workers(self, min_workers=1, timeout=None):
+
+        start_time = datetime.now()
+
+        while timeout is None or datetime.now() - start_time < timeout:
+            if self.get_workers_count() >= min_workers:
+                return
+
+            time.sleep(1)
 
     def update_workers(self, data):
         """
@@ -225,49 +219,41 @@ class Pool(object):
         args, and the kwargs are provided as keyword args.
         :return: None
         """
-        binary = pickle.dumps(('UPDATE_WORKERS_REQUEST', data))
-        self._socket.sendall(binary)
+        self._management_q.put(('TASK_UPDATE', data))
 
     def close(self):
         """
         Close the current pool. Active jobs, if any, are aborted.
         :return: None
         """
-        self._socket.close()
+        pass
 
-    def _init_work(self, worker_class, init_data):
-        message = {'worker_class': worker_class,  'init_data': init_data}
-        binary = pickle.dumps(('WORK_REQUEST', message))
-        self._socket.sendall(binary)
-        response = self._socket.recv(4096)
-        m_type, qs_info = pickle.loads(response)
+    def _enumerated_imap_unordered(self, jobs_data):
 
-        assert m_type == 'WORK_ACCEPTED', 'Invalid response for WORK_REQUEST'
+        jobs_q = RedisQueue(self._jobs_q_name, self._password, self._address, self._port)
+        results_q = RedisQueue(self._results_q_name, self._password, self._address, self._port)
 
-        return [RedisQueue(qs_info[q], self._password, self._address) for q in ('jobs_q', 'results_q', 'reschedule_q')]
+        jobs_data = list(jobs_data)
 
-    def _enumerated_imap_unordered(self, data):
+        for i, item in enumerate(jobs_data):
+            jobs_q.put((i, item))
 
-        data = list(data)
-
-        for i, item in enumerate(data):
-            self._jobs_q.put(pickle.dumps((i, item)))
-
-        remaining = set(range(len(data)))
+        remaining = set(range(len(jobs_data)))
 
         while len(remaining) > 0:
 
-            for message in self._reschedule_q.get_all_nowait():
-                reschedule_index = pickle.loads(message)
+            if jobs_q.qsize() == 0:
+                print(remaining)
 
-                if reschedule_index in remaining:
-                    print('Dropped job detected. Rescheduling.')
-                    self._jobs_q.put(pickle.dumps((reschedule_index, data[reschedule_index])))
+            index, result = results_q.get()
 
-            index, result = pickle.loads(self._results_q.get())
-            remaining.remove(index)
+            if result is None:
+                jobs_q.put((index, jobs_data[index]))
+                continue
 
-            yield index, result
+            if index in remaining:
+                remaining.remove(index)
+                yield index, result
 
     def __enter__(self):
         return self
