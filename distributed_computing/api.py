@@ -13,13 +13,13 @@ from distributed_computing.globals import DEFAULT_PORT, MANAGEMENT_Q_NAME, SERVE
 from distributed_computing.server import PoolServer
 
 
-def _run_pool_client(host, port, password):
+def _run_pool_client(host, port, password, max_gpus):
     setproctitle.setproctitle(CLIENT_PROCESS_NAME)
-    client = PoolClient(host, port, password)
+    client = PoolClient(host, port, password, max_gpus)
     client.start()
 
 
-def start_node(password, address='localhost', port=DEFAULT_PORT):
+def start_node(password, address='localhost', port=DEFAULT_PORT, max_gpus=None):
     """
     Start a worker node on the local machine.
     :param password: worker pool password to prevent unauthorized access.
@@ -36,7 +36,7 @@ def start_node(password, address='localhost', port=DEFAULT_PORT):
 
     print('Starting workers pool client.')
 
-    client = Process(target=_run_pool_client, args=(address, port, password))
+    client = Process(target=_run_pool_client, args=(address, port, password, max_gpus))
     client.start()
 
     return lambda: client.terminate(), lambda: client.join()
@@ -74,7 +74,7 @@ def start_server(password, port=DEFAULT_PORT):
     return lambda: pool_server.terminate(), lambda: pool_server.join()
 
 
-def start_head_node(password, port=DEFAULT_PORT):
+def start_head_node(password, port=DEFAULT_PORT, max_gpus=None):
     """
     Start a worker pool server and a worker node on the local machine. A redis server is also started by this function
     if not already running.
@@ -84,7 +84,7 @@ def start_head_node(password, port=DEFAULT_PORT):
     finish.
     """
     server_terminator, server_waiter = start_server(password, port)
-    client_terminator, client_waiter = start_node(password, port=port)
+    client_terminator, client_waiter = start_node(password, port=port, max_gpus=max_gpus)
 
     def terminate():
         server_terminator()
@@ -118,7 +118,7 @@ class Pool(object):
     Worker pool interface, similar to python multiprocessing Pool interface.
     """
     def __init__(self, worker_class, init_data, password, server_address='localhost', server_port=DEFAULT_PORT,
-                 job_timeout=None, min_gpu_memory_required=11000):
+                 job_timeout=None, min_gpu_memory_required=11000, min_workers=0):
         """
         Initialize pool and connect to the worker pool server.
         :param worker_class: A worker class that implements the WorkerInterface. This class is instantiated on each
@@ -151,6 +151,10 @@ class Pool(object):
         self._jobs_q_name = data['jobs_q_name']
         self._results_q_name = data['results_q_name']
 
+        # TODO: what to do when workers are leaving and this number is reached?
+        if min_workers:
+            self.wait_for_workers(min_workers)
+
     def imap_unordered(self, data):
         """
         Return results once ready. Order is not guaranteed. Similar to multiprocessing.Pool.imap_unordered.
@@ -160,6 +164,25 @@ class Pool(object):
         """
         for _, result in self._enumerated_imap_unordered(data):
             yield result
+
+    def imap(self, data):
+        """
+        Return all the results, ordered by the corresponding inputs ordering. Similar to multiprocessing.Pool.map.
+        :param data: List of items to be processed by the worker. This is a dictionary
+        of the form {'args': [...], 'kwargs': {...}}. The args are provided to the worker class run method as args,
+        and the kwargs are provided as keyword args.
+        :return: results list.
+        """
+        results = {}
+        returned = 0
+
+        for index, result in self._enumerated_imap_unordered(data):
+            results[index] = result
+
+            if returned in results:
+                yield results[returned]
+                del results[returned]
+                returned += 1
 
     def map(self, data):
         """
@@ -235,6 +258,8 @@ class Pool(object):
 
         jobs_data = list(jobs_data)
 
+        # TODO: postpone the later parts addition if the jobs are too heavy. Push them only when the first ones were
+        #  finished.
         for i, item in enumerate(jobs_data):
             jobs_q.put((i, item))
 

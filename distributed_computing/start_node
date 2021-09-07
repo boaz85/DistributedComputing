@@ -8,11 +8,12 @@ from distributed_computing.globals import DEFAULT_PORT
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("-r", "--password", help='Security password')
+parser.add_argument("-r", "--password", required=True, help='Security password')
 parser.add_argument("-d", "--head", action="store_true", help='Indicate that this is the head node')
 parser.add_argument("-s", "--server-only", action="store_true", help='Run only the server')
 parser.add_argument("-a", "--address", required=False, help='Head node address')
 parser.add_argument("-p", "--port", required=False, type=int, help='Head node port')
+parser.add_argument("-m", "--max-gpus", required=False, type=int, help='Maximum number of GPUs to use')
 parser.add_argument("-n", "--name", required=False, help='Node name')
 
 
@@ -34,9 +35,9 @@ if __name__ == '__main__':
         terminate, wait = start_server(args.password, port)
 
     elif args.head:
-        terminate, wait = start_head_node(args.password, port)
+        terminate, wait = start_head_node(args.password, port, max_gpus=args.max_gpus)
 
     else:
-        terminate, wait = start_node(args.password, args.address, port)
+        terminate, wait = start_node(args.password, args.address, port, max_gpus=args.max_gpus)
 
     wait()

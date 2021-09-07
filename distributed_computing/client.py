@@ -3,6 +3,7 @@ import os
 import signal
 import socket
 import time
+from collections import Counter
 from multiprocessing import Process
 
 import GPUtil
@@ -47,6 +48,8 @@ class ExperimentWorkerExecutor(Process):
         private_q = RedisQueue(self.private_q_name, self.head_password, self.head_address)
         master_q = RedisQueue(self.master_q_name, self.head_password, self.head_address)
 
+        # Without this variable, the GPU numbering is different than the one returned by GPUtil/nvidia-smi
+        os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
         os.environ['CUDA_VISIBLE_DEVICES'] = str(self.gpu_idx)
         worker = self._get_worker_instance(self.init_data)
 
@@ -55,7 +58,7 @@ class ExperimentWorkerExecutor(Process):
             index, data = jobs_q.get()
             master_q.put(('WORKER_STATUS_UPDATE', {'client': self.client_name, 'worker': self.name,
                                                    'job': index, 'status': 'in_progress'}))
-            print('Processing job', index)
+            print(f'\033[96m{self.name} >>\033[0m Processing job {index}')
 
             for update_data in private_q.get_all_nowait():
                 worker.handle_update(*update_data.get('args', []), **update_data.get('kwargs', {}))
@@ -64,16 +67,17 @@ class ExperimentWorkerExecutor(Process):
             results_q.put((index, result))
             master_q.put(('WORKER_STATUS_UPDATE', {'client': self.client_name, 'worker': self.name,
                                                    'job': index, 'status': 'finished'}))
-            print('Done processing job', index)
+            print(f'\033[96m{self.name} >>\033[0m Done processing job {index}')
 
 
 class PoolClient(object):
 
-    def __init__(self, host, port, password):
+    def __init__(self, host, port, password, max_gpus):
 
         self._host = host
         self._port = port
         self._password = password
+        self._max_gpus = max_gpus
         self._workers = {}
         self._gpu_memory_required = 0
         self._name = socket.gethostname()
@@ -93,8 +97,8 @@ class PoolClient(object):
 
             self._send_heartbeat_to_server()
 
-            if self._task_assigned:
-                self._start_available_workers()
+            # if self._task_assigned:
+            #     self._start_available_workers()
 
             if item is None:
                 continue
@@ -116,14 +120,27 @@ class PoolClient(object):
             if worker_name in self._workers:
                 continue
 
-            if info['free_gpu_memory'] > self._gpu_memory_required:
-                self._workers[worker_name] = info
-                self._workers[worker_name]['pid'] = self._start_worker(worker_name, info['gpu_index'])
+            if self._max_gpus is None or len(self._workers) < self._max_gpus:
+                if info['free_gpu_memory'] > self._gpu_memory_required:
+                    self._workers[worker_name] = info
+                    self._workers[worker_name]['pid'] = self._start_worker(worker_name, info['gpu_index'])
 
     def _handle_worker_reset(self, worker_name):
 
+        self._workers[worker_name]['resets_count'] = self._workers[worker_name].get('resets_count', 0) + 1
+
+        if not psutil.pid_exists(self._workers[worker_name]['pid']):
+            print('Worker is already dead. Reset aborted.')
+            self._workers.pop(worker_name)
+            return
+
         print('Killing worker:', worker_name)
         self._kill_worker(worker_name)
+
+        if self._workers[worker_name]['resets_count'] == 2:
+            self._workers.pop(worker_name)
+            print('Two reset requests for worker', worker_name, 'were counted. Stopping it permanently.')
+            return
 
         time.sleep(10)
 
@@ -131,7 +148,8 @@ class PoolClient(object):
         self._workers[worker_name]['pid'] = self._start_worker(worker_name, self._workers[worker_name]['gpu_index'])
 
     def _get_available_gpus(self):
-        return {str(gpu.id): {'gpu_index': gpu.id, 'free_gpu_memory': gpu.memoryFree} for gpu in GPUtil.getGPUs()}
+        return {str(gpu.id): {'gpu_index': gpu.id,
+                              'free_gpu_memory': gpu.memoryFree} for gpu in GPUtil.getGPUs()}
 
     def _send_heartbeat_to_server(self, first=False):
         self._management_q.put(('CLIENT_HEARTBEAT', {'name': self._name, 'first': first,

@@ -55,7 +55,7 @@ class PoolServer(object):
                 self._handle_worker_status_update(data)
 
             elif message == 'COUNTS_REQUEST':
-                self._handle_count_request(data)
+                self._handle_count_request()
 
             elif message == 'CLIENT_HEARTBEAT':
                 self._handle_client_heartbeat(data)
@@ -65,7 +65,7 @@ class PoolServer(object):
 
     def _check_for_disconnected_clients(self):
 
-        for client in self._last_heartbeat_by_client:
+        for client in list(self._last_heartbeat_by_client):
 
             if (datetime.now() - self._last_heartbeat_by_client[client]).total_seconds() > 180:
                 print(f'Didn\'t hear from {client} for too long. Rescheduling its tasks.')
@@ -117,7 +117,7 @@ class PoolServer(object):
                     worker_info['active_job'] = None
                     worker_info['job_start_time'] = None
 
-            ws = 's' if len(info["workers_info"]) > 1 else ''
+            ws = 's' if len(info["worker_names"]) > 1 else ''
             print(f'Rejoining the node {info["name"]} with {len(info["worker_names"])} worker{ws}.')
             self._register_client(info)
 
@@ -138,7 +138,10 @@ class PoolServer(object):
 
             # Check for stuck workers
             for client_name, client_info in self._clients.items():
-                for worker_name, worker_info in client_info['workers'].items():
+
+                for worker_name in list(client_info['workers']):
+
+                    worker_info = client_info['workers'][worker_name]
 
                     if worker_info['job_start_time'] is None:
                         continue
@@ -150,11 +153,10 @@ class PoolServer(object):
                               client_name, f'is taking too long ({time_since_job_start.total_seconds()} seconds). '
                               'Rescheduling and resetting worker.')
                         self._results_q.put((worker_info['active_job'], None))
-                        worker_info['active_job'] = None
-                        worker_info['job_start_time'] = None
+                        client_info['workers'].pop(worker_name)
                         client_info['private_q'].put(('WORKER_RESET', worker_name))
 
-    def _handle_count_request(self, _):
+    def _handle_count_request(self):
         #print({c: [w for w in cc['workers']] for c, cc in self._clients.items()})
         workers_count = sum(len(c['workers']) for c in self._clients.values())
         self._master_q.put(('COUNTS_RESPONSE', {'clients_count': len(self._clients), 'workers_count': workers_count}))
@@ -216,7 +218,8 @@ class PoolServer(object):
 
             client_info['private_q'].put(('TASK_ASSIGNMENT', {
                 'init_data': self._init_data, 'jobs_q_name': self._jobs_q_name, 'worker_class': self._worker_class,
-                'results_q_name': self._results_q_name, 'worker_q_names': worker_q_names
+                'results_q_name': self._results_q_name, 'worker_q_names': worker_q_names,
+                'gpu_memory_required': self._min_gpu_memory_required
             }))
 
         for client_name, client_info in self._clients.items():
@@ -240,7 +243,7 @@ class PoolServer(object):
         client_info = {'private_q': client_q, 'workers': {}}
 
         if len(self._updates_history) > 0:
-            wp = 's' if len(registration_info['workers_info']) > 1 else ''
+            wp = 's' if len(registration_info['worker_names']) > 1 else ''
             us = 's' if len(self._updates_history) > 1 else ''
             print(f'Updating {registration_info["name"]} worker{wp} with {len(self._updates_history)} update{us}')
 
